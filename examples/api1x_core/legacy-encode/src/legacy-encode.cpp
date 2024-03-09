@@ -11,10 +11,10 @@
 /// @file
 
 #include "util.hpp"
+#include <chrono>
+using namespace std::chrono;
 
 #define TARGETKBPS            4000
-#define FRAMERATE             30
-#define OUTPUT_FILE           "out.h265"
 #define BITSTREAM_BUFFER_SIZE 2000000
 
 void Usage(void) {
@@ -22,11 +22,41 @@ void Usage(void) {
     printf("   Usage  :  legacy-encode\n");
     printf("     -i input file name (NV12 raw frames)\n");
     printf("     -w input width\n");
-    printf("     -h input height\n\n");
-    printf("   Example:  legacy-encode -i in.NV12 -w 320 -h 240\n");
-    printf("   To view:  ffplay %s\n\n", OUTPUT_FILE);
-    printf(" * Encode raw frames to HEVC/H265 elementary stream in %s\n\n", OUTPUT_FILE);
+    printf("     -h input height\n");
+    printf("     -f framerate(default: 25)\n");
+    printf("     -q quality (default: 90)\n ");
+    printf("   Example:  legacy-encode -i in.NV12 -w 320 -h 240 -f 25\n");
+    printf(" * Encode raw frames to JPEG images");
     return;
+}
+
+bool ResetForNewResolution(mfxSession& session, mfxVideoParam& encodeParams, mfxU16 newWidth, mfxU16 newHeight){
+    // Update parameters of resolution.
+    encodeParams.mfx.FrameInfo.CropW         = newWidth;
+    encodeParams.mfx.FrameInfo.CropH         = newHeight;
+    encodeParams.mfx.FrameInfo.Width         = ALIGN16(encodeParams.mfx.FrameInfo.CropW);
+    encodeParams.mfx.FrameInfo.Height        = ALIGN16(encodeParams.mfx.FrameInfo.CropH);
+
+    // Retrieve video parameters selected by encoder.
+    mfxVideoParam par;
+    memset(&par, 0, sizeof(par));
+    mfxStatus sts = MFXVideoENCODE_GetVideoParam(session, &par);
+    if(MFX_ERR_NONE != sts){
+        printf("Get Parameter failed");
+        return false;
+    }
+
+    auto tick = system_clock::now();
+    sts = MFXVideoENCODE_Reset(session, &encodeParams);
+    auto tock = system_clock::now();
+    if(MFX_ERR_NONE != sts){
+        printf("Encode Reset failed");
+        return false; 
+    }
+    auto duration = duration_cast<microseconds>(tock - tick);
+    double resetTime = duration.count() / 1000.000;
+    printf("Reset Time: %.3fms\n", resetTime);
+    return true;
 }
 
 int main(int argc, char *argv[]) {
@@ -52,6 +82,8 @@ int main(int argc, char *argv[]) {
     int nIndex                      = -1;
     mfxStatus sts                   = MFX_ERR_NONE;
     Params cliParams                = {};
+    char outputfilename[128];
+    sprintf(outputfilename,"frame%d.jpg", framenum + 1);
 
     //Parse command line args to cliParams
     if (ParseArgsAndValidate(argc, argv, &cliParams, PARAMS_ENCODE) == false) {
@@ -62,7 +94,7 @@ int main(int argc, char *argv[]) {
     source = fopen(cliParams.infileName, "rb");
     VERIFY(source, "Could not open input file");
 
-    sink = fopen(OUTPUT_FILE, "wb");
+    sink = fopen(outputfilename, "wb");
     VERIFY(sink, "Could not create output file");
 
     // Initialize session
@@ -89,11 +121,8 @@ int main(int argc, char *argv[]) {
     accelHandle = InitAcceleratorHandle(session, &accel_fd);
 
     // Initialize encode parameters
-    encodeParams.mfx.CodecId                 = MFX_CODEC_HEVC;
-    encodeParams.mfx.TargetUsage             = MFX_TARGETUSAGE_BALANCED;
-    encodeParams.mfx.TargetKbps              = TARGETKBPS;
-    encodeParams.mfx.RateControlMethod       = MFX_RATECONTROL_VBR;
-    encodeParams.mfx.FrameInfo.FrameRateExtN = FRAMERATE;
+    encodeParams.mfx.CodecId                 = MFX_CODEC_JPEG;
+    encodeParams.mfx.FrameInfo.FrameRateExtN = cliParams.frameRate;
     encodeParams.mfx.FrameInfo.FrameRateExtD = 1;
     encodeParams.mfx.FrameInfo.FourCC        = MFX_FOURCC_NV12;
     encodeParams.mfx.FrameInfo.ChromaFormat  = MFX_CHROMAFORMAT_YUV420;
@@ -103,6 +132,10 @@ int main(int argc, char *argv[]) {
     encodeParams.mfx.FrameInfo.CropH         = cliParams.srcHeight;
     encodeParams.mfx.FrameInfo.Width         = ALIGN16(cliParams.srcWidth);
     encodeParams.mfx.FrameInfo.Height        = ALIGN16(cliParams.srcHeight);
+
+    encodeParams.mfx.Interleaved     = 1;
+    encodeParams.mfx.Quality         = cliParams.quality;
+    encodeParams.mfx.RestartInterval = 0;
 
     encodeParams.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY;
 
@@ -117,8 +150,13 @@ int main(int argc, char *argv[]) {
     VERIFY(MFX_ERR_NONE == sts, "Encode query failed");
 
     // Initialize encoder
+    auto tick = system_clock::now();      
     sts = MFXVideoENCODE_Init(session, &encodeParams);
+    auto tock = system_clock::now();
     VERIFY(MFX_ERR_NONE == sts, "Encode init failed");
+    auto duration = duration_cast<microseconds>(tock - tick);
+    double initduration = duration.count() / 1000.000;
+    printf("Initialization Time: %.3fms\n", initduration);
 
     // Query number required surfaces for decoder
     sts = MFXVideoENCODE_QueryIOSurf(session, &encodeParams, &encRequest);
@@ -140,7 +178,6 @@ int main(int argc, char *argv[]) {
     // ===================================
     // Start encoding the frames
     //
-    printf("Encoding %s -> %s\n", cliParams.infileName, OUTPUT_FILE);
 
     while (isStillGoing == true) {
         // Load a new frame if not draining
@@ -167,8 +204,27 @@ int main(int argc, char *argv[]) {
                     do {
                         sts = MFXVideoCORE_SyncOperation(session, syncp, WAIT_100_MILLISECONDS);
                         if (MFX_ERR_NONE == sts) {
+                            sink = fopen(outputfilename, "wb");
+                            VERIFY(sink, "Could not create output file");
                             WriteEncodedStream(bitstream, sink);
                             framenum++;
+                            sprintf(outputfilename,"frame%d.jpg", framenum + 1);
+                            if(framenum == 1) {
+                                // Update source
+                                source = fopen("/home/emonlu/code/dataset/640x640.yuv", "rb");
+                                VERIFY(source, "Could not open input file");
+                                bool isResetSuccess = ResetForNewResolution(session, encodeParams, 640, 640);
+                                VERIFY(isResetSuccess,"The reset procedure is failed.")
+                                // Update encRequest and encSurfPool.
+                                sts = MFXVideoENCODE_QueryIOSurf(session, &encodeParams, &encRequest);
+                                VERIFY(MFX_ERR_NONE == sts, "QueryIOSurf failed");
+                                encSurfPool = (mfxFrameSurface1 *)calloc(sizeof(mfxFrameSurface1), encRequest.NumFrameSuggested);
+                                sts = AllocateExternalSystemMemorySurfacePool(&encOutBuf,
+                                                  encSurfPool,
+                                                  encodeParams.mfx.FrameInfo,
+                                                  encRequest.NumFrameSuggested);
+                            }
+                            if(framenum == 3) goto end;
                         }
                     } while (sts == MFX_WRN_IN_EXECUTION);
 

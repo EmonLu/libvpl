@@ -43,8 +43,10 @@ enum {
 
 #define WAIT_100_MILLISECONDS 100
 #define MAX_PATH              260
-#define MAX_WIDTH             3840
-#define MAX_HEIGHT            2160
+#define MAX_WIDTH             16384
+#define MAX_HEIGHT            16384
+#define MAX_FRAMERATE         60
+#define MAX_QUALITY           100
 #define IS_ARG_EQ(a, b)       (!strcmp((a), (b)))
 
 #define VERIFY(x, y)       \
@@ -73,6 +75,9 @@ typedef struct _Params {
 
     mfxU16 srcWidth;
     mfxU16 srcHeight;
+    
+    mfxU16 frameRate = 25;
+    mfxU16 quality = 90;
 } Params;
 
 char *ValidateFileName(char *in) {
@@ -132,6 +137,14 @@ bool ParseArgsAndValidate(int argc, char *argv[], Params *params, ParamGroup gro
         }
         else if (IS_ARG_EQ(s, "h")) {
             if (!ValidateSize(argv[idx++], &params->srcHeight, MAX_HEIGHT))
+                return false;
+        }
+        else if (IS_ARG_EQ(s, "f")) {
+            if (!ValidateSize(argv[idx++], &params->frameRate, MAX_FRAMERATE))
+                return false;
+        }
+        else if (IS_ARG_EQ(s, "q")) {
+            if (!ValidateSize(argv[idx++], &params->quality, MAX_QUALITY))
                 return false;
         }
     }
